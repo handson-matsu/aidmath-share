@@ -11,6 +11,12 @@ const Admin = {
       if (method === 'listTopics') runner.adminListTopics();
       else if (method === 'createTopic') runner.adminCreateTopic(payload);
       else if (method === 'updateTopic') runner.adminUpdateTopic(payload);
+      else if (method === 'listPosts') runner.adminListPosts();
+      else if (method === 'setPostStatus') runner.adminSetPostStatus(payload);
+      else if (method === 'listComments') runner.adminListComments();
+      else if (method === 'setCommentStatus') runner.adminSetCommentStatus(payload);
+      else if (method === 'listRequests') runner.adminListDeleteRequests();
+      else if (method === 'resolveRequest') runner.adminResolveDeleteRequest(payload);
       else reject(new Error('未対応の操作です。'));
     });
   },
@@ -67,7 +73,127 @@ const Topics = (() => {
   $('editor').addEventListener('cancel',event=>{if(saving)event.preventDefault();});
   $('cancel').addEventListener('click',()=>{if(!saving)$('editor').close();});
   $('new-topic').addEventListener('click',()=>open(null));$('reload').addEventListener('click',()=>load());
-  return {load};
+  return {load, isBusy: () => loading || saving};
 })();
+const Moderation = (() => {
+  const $ = id => document.getElementById(id);
+  const labels = { published: '公開', hidden: '非公開', deleted: '削除済み', pending: '未処理', approved: '承認済み', rejected: '却下済み' };
+  const titles = { posts: '作品管理', comments: 'コメント管理', requests: '削除申請管理' };
+  let view = 'posts', loading = false, saving = false, records = [];
+  const known = status => ['published', 'hidden', 'deleted'].includes(status);
+  const statusText = status => (labels[status] || '不明な状態') + '（' + status + '）';
+  function date(value) {
+    const parsed = new Date(value);
+    return value && Number.isFinite(parsed.getTime()) ? parsed.toLocaleString('ja-JP') : '日時不明';
+  }
+  function controls() {
+    $('moderation-reload').disabled = loading || saving;
+    $('request-filter').disabled = loading || saving;
+    document.querySelectorAll('#moderation-list button').forEach(b => { b.disabled = loading || saving; });
+    document.querySelectorAll('[data-view]').forEach(b => { b.disabled = loading || saving; });
+  }
+  function note(card, text, cls = 'meta') { card.append(Admin.node('p', text, cls)); }
+  function action(card, label, run, danger = false) {
+    const button = Admin.node('button', label, danger ? 'danger' : 'secondary');
+    button.type = 'button'; button.addEventListener('click', run); card.append(button);
+  }
+  function render() {
+    const list = $('moderation-list'); list.replaceChildren();
+    const filtered = view === 'requests' && $('request-filter').value === 'pending' ? records.filter(r => r.status === 'pending') : records;
+    if (!filtered.length) { list.append(Admin.node('p', '該当するデータはありません。', 'empty')); return; }
+    for (const item of filtered) {
+      const card = Admin.node('article', undefined, 'topic moderation-card');
+      const heading = Admin.node('h2', view === 'posts' ? (item.title || '無題') : view === 'comments' ? (item.postTitle || '無題の作品') : '削除申請');
+      heading.append(Admin.node('span', statusText(item.status), 'badge' + (item.status === 'published' ? '' : ' inactive')));
+      card.append(heading); note(card, 'ID: ' + item.id);
+      if (view === 'posts') note(card, 'テーマ：' + item.topicTitle + '（' + item.topicId + '）');
+      if (view === 'comments') {
+        note(card, '作品ID: ' + item.postId + ' ／ 作品の状態：' + statusText(item.postStatus));
+        note(card, item.replyTo ? '返信コメント ／ 返信先ID: ' + item.replyTo : '通常コメント');
+      }
+      note(card, (view === 'requests' ? '申請日：' : '投稿日：') + date(item.createdAt));
+      if (view === 'requests') {
+        note(card, '対象：' + (item.targetType === 'post' ? '作品' : item.targetType === 'comment' ? 'コメント' : '不明な種別') + ' ／ ID: ' + item.targetId);
+        note(card, '申請理由：' + item.reason, 'description');
+        if (item.target) {
+          note(card, '対象作品：' + (item.target.title || '無題'));
+          note(card, '投稿者：' + (item.target.displayName || '匿名さん') + ' ／ 状態：' + statusText(item.target.status));
+          if (item.target.replyTo) note(card, '返信先ID: ' + item.target.replyTo);
+          note(card, item.target.body || '（本文なし）', 'description');
+        } else note(card, '対象を確認できないため承認できません。', 'hint');
+      } else {
+        note(card, '投稿者：' + (item.displayName || '匿名さん'));
+        note(card, item.body || '（本文なし）', 'description');
+      }
+      const actions = Admin.node('div', undefined, 'actions');
+      if (view === 'requests' && item.status === 'pending') {
+        if (item.target && known(item.target.status)) action(actions, '承認して削除', () => resolve(item, 'approved'), true);
+        else if (item.target) note(card, '対象が不明な状態のため承認できません。', 'hint');
+        action(actions, '却下', () => resolve(item, 'rejected'));
+      } else if (view !== 'requests') {
+        if (item.status === 'published') action(actions, '非公開にする', () => update(item, 'hidden'));
+        if (item.status === 'hidden') action(actions, '公開に戻す', () => update(item, 'published'));
+        if (['published', 'hidden'].includes(item.status)) action(actions, '削除する', () => update(item, 'deleted'), true);
+        else note(card, item.status === 'deleted' ? '削除済みです。この画面から再公開はできません。' : '不明な状態のため変更できません。シートを確認してください。', 'hint');
+      }
+      card.append(actions); list.append(card);
+    }
+  }
+  async function load(message = '') {
+    if (loading) return;
+    loading = true; controls(); $('moderation-list').setAttribute('aria-busy', 'true');
+    $('moderation-message').textContent = message ? message + ' 一覧を更新中…' : '読み込み中…';
+    try {
+      records = await Admin.call({ posts: 'listPosts', comments: 'listComments', requests: 'listRequests' }[view]);
+      records.sort((a, b) => (Date.parse(b.createdAt) || 0) - (Date.parse(a.createdAt) || 0));
+      render(); $('moderation-message').textContent = message;
+    } catch (e) {
+      records = []; $('moderation-list').replaceChildren();
+      $('moderation-message').textContent = (message ? message + ' ' : '') + e.message;
+    } finally { loading = false; controls(); $('moderation-list').setAttribute('aria-busy', 'false'); }
+  }
+  async function mutate(method, payload, confirmation) {
+    if (loading || saving) return;
+    if (confirmation && !window.confirm(confirmation)) return;
+    saving = true; controls(); $('moderation-message').textContent = '処理中…';
+    try { await Admin.call(method, payload); await load('処理が完了しました。公開画面は再読み込み後に反映されます。'); }
+    catch (e) {
+      // Discard stale actions: a failed response does not prove that the write failed.
+      records = []; $('moderation-list').replaceChildren();
+      $('moderation-message').textContent = e.message + ' 保存済みの可能性があります。「再読み込み」で現在の状態を確認してください。';
+    } finally { saving = false; controls(); }
+  }
+  function update(item, status) {
+    return mutate(view === 'posts' ? 'setPostStatus' : 'setCommentStatus', { id: item.id, status, revision: item.revision },
+      status === 'deleted' ? 'この' + (view === 'posts' ? '作品' : 'コメント') + 'を削除済みにしますか？この画面から元に戻せません。\n' + (item.title || item.body).slice(0, 160) : '公開状態を「' + statusText(status) + '」に変更しますか？');
+  }
+  function resolve(item, decision) {
+    const payload = { id: item.id, decision, revision: item.revision };
+    if (decision === 'approved') { payload.targetRevision = item.target.contentRevision; payload.targetStatus = item.target.status; }
+    return mutate('resolveRequest', payload, decision === 'approved'
+      ? 'この削除申請を承認し、対象を削除済みにしますか？この画面から元に戻せません。\n対象ID: ' + item.targetId
+      : 'この申請を却下しますか？対象の状態は変更しません。');
+  }
+  function open(next) {
+    view = next; records = []; $('moderation-list').replaceChildren();
+    $('moderation-title').textContent = titles[view];
+    $('moderation-hint').textContent = view === 'requests'
+      ? '承認は対象を削除済みにし、却下は対象を変更しません。対象が既に削除済みの申請も承認できます。'
+      : '全状態のデータを表示します。削除済みのデータは再公開できません。作品や親コメントの状態を変えても、関連コメントの状態は自動変更しません。';
+    $('request-filter').hidden = $('request-filter-label').hidden = view !== 'requests';
+    $('request-filter').value = 'pending'; load();
+  }
+  $('moderation-reload').addEventListener('click', () => load());
+  $('request-filter').addEventListener('change', () => { if (!loading && !saving) render(); });
+  return { open, isBusy: () => loading || saving };
+})();
+document.querySelectorAll('[data-view]').forEach(button => button.addEventListener('click', () => {
+  if (Topics.isBusy() || Moderation.isBusy() || document.getElementById('editor').open) return;
+  const view = button.dataset.view;
+  document.querySelectorAll('[data-view]').forEach(b => { if (b === button) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
+  document.getElementById('topics').hidden = view !== 'topics';
+  document.getElementById('moderation').hidden = view === 'topics';
+  if (view === 'topics') Topics.load(); else Moderation.open(view);
+}));
 Topics.load();
 </script>
