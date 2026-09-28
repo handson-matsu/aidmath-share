@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#187568">
+  <meta name="referrer" content="no-referrer">
+  <title>AidMath-Share | 数学の発見を、分かち合おう。</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <a class="skip" href="#main">本文へ移動</a>
+  <header class="site-header"><a class="brand" href="#"><span class="brand-icon" aria-hidden="true">✳</span> AidMath<span class="brand-light">-Share</span></a><span class="header-note">数学探究の作品ギャラリー</span></header>
+  <main id="main" tabindex="-1"></main>
+  <div id="notice" class="notice" role="status" aria-live="polite"></div>
+  <footer>小さな気づきから、次の探究へ。<span>AidMath-Share</span><p>名前はニックネームで。個人情報を含む画像や文章の投稿は控えましょう。</p></footer>
+  <dialog id="delete-dialog" aria-labelledby="delete-title">
+    <form id="delete-form"><h2 id="delete-title">削除を申請する</h2><p>申請後、管理者が内容を確認します。すぐに削除されることはありません。</p><label for="delete-reason">申請理由 <span>必須</span></label><textarea id="delete-reason" name="reason" rows="4" maxlength="2000" required></textarea><p class="form-error" role="alert"></p><div class="actions"><button type="button" class="secondary" id="delete-cancel">キャンセル</button><button type="submit">申請する</button></div></form>
+  </dialog>
+</body>
+</html>
