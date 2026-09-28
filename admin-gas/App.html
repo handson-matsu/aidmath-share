@@ -1,0 +1,73 @@
+<script>
+'use strict';
+// Page shell and service client are separate from the topics module for future screens.
+const Admin = {
+  call(method, payload) {
+    return new Promise((resolve, reject) => {
+      const runner = google.script.run.withSuccessHandler(result => {
+        if (result && result.ok) resolve(result.data);
+        else reject(new Error(result?.error?.message || '処理を完了できませんでした。'));
+      }).withFailureHandler(() => reject(new Error('通信結果を確認できません。一覧を再読み込みして保存結果を確認してください。')));
+      if (method === 'listTopics') runner.adminListTopics();
+      else if (method === 'createTopic') runner.adminCreateTopic(payload);
+      else if (method === 'updateTopic') runner.adminUpdateTopic(payload);
+      else reject(new Error('未対応の操作です。'));
+    });
+  },
+  node(tag, text, cls) { const n=document.createElement(tag); if(text!==undefined)n.textContent=text; if(cls)n.className=cls; return n; }
+};
+const Topics = (() => {
+  const $ = id => document.getElementById(id);
+  let current = null, loading = false, saving = false;
+  function controls() {
+    $('reload').disabled=loading||saving; $('new-topic').disabled=loading||saving;
+    document.querySelectorAll('#list button').forEach(b=>{b.disabled=loading||saving;});
+    document.querySelectorAll('#topic-form input,#topic-form textarea,#topic-form button').forEach(n=>{n.disabled=saving;});
+    $('topic-id').disabled=saving||Boolean(current);
+    $('topic-active').disabled=saving||!current;
+  }
+  function open(topic) {
+    if(loading||saving||topic?.protected)return;
+    current=topic||null; $('topic-form').reset();
+    $('editor-title').textContent=current?'テーマを編集':'テーマを追加';
+    $('topic-id').value=current?.topicId||''; $('topic-title').value=current?.title||''; $('topic-description').value=current?.description||'';
+    $('topic-active').checked=current?.isActive||false; $('new-hint').hidden=Boolean(current);
+    $('flags').textContent=`画像：${(current?.imageEnabled??true)?'有効':'無効'} ／ コメント：${(current?.commentEnabled??true)?'有効':'無効'}（今回は変更できません）`;
+    $('form-message').textContent=''; controls(); $('editor').showModal();
+  }
+  function render(topics) {
+    $('list').replaceChildren();
+    if(!topics.length){$('list').append(Admin.node('p','テーマはまだありません。','empty'));return;}
+    for(const topic of topics){
+      const card=Admin.node('article',undefined,'topic');
+      const heading=Admin.node('h2',topic.title);heading.append(Admin.node('span',topic.isActive?'公開':'非公開','badge'+(topic.isActive?'':' inactive')));
+      card.append(heading,Admin.node('p','ID: '+topic.topicId,'meta'),Admin.node('p',topic.description,'description'),Admin.node('p',`画像：${topic.imageEnabled?'有効':'無効'} ／ コメント：${topic.commentEnabled?'有効':'無効'}`,'meta'));
+      if(topic.protected)card.append(Admin.node('p','既存テーマのため保護されています。今回は変更できません。','hint'));
+      else {const edit=Admin.node('button','編集・公開状態を変更','secondary');edit.type='button';edit.addEventListener('click',()=>open(topic));card.append(edit);}
+      $('list').append(card);
+    }
+  }
+  async function load(successMessage='') {
+    if(loading)return;loading=true;controls();$('list').setAttribute('aria-busy','true');$('message').textContent='テーマを読み込み中…';
+    try{render(await Admin.call('listTopics'));$('message').textContent=successMessage;}
+    catch(e){$('list').replaceChildren();$('message').textContent=e.message;}
+    finally{loading=false;controls();$('list').setAttribute('aria-busy','false');}
+  }
+  $('topic-form').addEventListener('submit',async event=>{
+    event.preventDefault();if(saving)return;
+    const payload={topicId:$('topic-id').value.trim(),title:$('topic-title').value.trim(),description:$('topic-description').value.trim()};
+    if(current){payload.isActive=$('topic-active').checked;payload.revision=current.revision;}
+    if(!payload.topicId||!payload.title){$('form-message').textContent='テーマIDとテーマ名を入力してください。';return;}
+    if(current&&current.isActive!==payload.isActive&&!window.confirm(payload.isActive?'このテーマを公開しますか？':'このテーマを一覧から非公開にしますか？作品自体の公開状態は変更しません。'))return;
+    saving=true;controls();$('form-message').textContent='保存中…';
+    try{await Admin.call(current?'updateTopic':'createTopic',payload);$('editor').close();saving=false;await load('保存しました。生徒用ページを再読み込みすると反映されます。');}
+    catch(e){$('form-message').textContent=e.message+' 保存結果が不明な場合は、キャンセルして一覧を再読み込みしてください。';}
+    finally{saving=false;controls();}
+  });
+  $('editor').addEventListener('cancel',event=>{if(saving)event.preventDefault();});
+  $('cancel').addEventListener('click',()=>{if(!saving)$('editor').close();});
+  $('new-topic').addEventListener('click',()=>open(null));$('reload').addEventListener('click',()=>load());
+  return {load};
+})();
+Topics.load();
+</script>
