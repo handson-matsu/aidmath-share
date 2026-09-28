@@ -4,6 +4,8 @@
 
 ## 最新の作業状況
 
+削除申請にも重複防止・保存結果照会をローカル実装しました。**公開GASへの追加・再デプロイは未実施です。新フロントの公開前にGASの更新が必要です。** [削除申請の反映手順](gas/DELETE-REQUESTS-DEPLOY.md)を参照してください。DeleteRequestsの列追加は不要です。以下の作品投稿の記録とは別の変更です。
+
 作品投稿のrequestIdによる重複防止と、応答不明時の保存結果照会を実装しました。**ユーザーによるGAS・Posts J列の更新後、実API検証も完了しました。新フロントのPush・Pages公開は未実施です。** GAS更新用コードと反映手順は [gas/DEPLOY.md](gas/DEPLOY.md) を参照してください。
 
 同一requestIdの再送では保存済み作品を返します。応答不明時は自動照会し、保存済みなら通常の完了へ進みます。確認できなければ結果不明の状態を保ち、再試行も同じIDで行います。再読み込み後はIDから照会しますが、画像は永続保存しないため再送はできません。
@@ -58,7 +60,7 @@ URLの `?action=...` とフォーム本文の `action` の両方に操作名を�
 | --- | --- |
 | createPost | topicId, authorId, requestId, displayName, title, body, imageType, imageData（接頭辞なしのbase64） |
 | createComment | postId, authorId, displayName, body, replyTo（通常コメントは空文字） |
-| requestDelete | targetType（post / comment）, targetId, requesterId, reason（実APIでの申請は未検証） |
+| requestDeleteV2 | requestId, targetType（post / comment）, targetId, requesterId, reason（新GASへの追加が必要） |
 
 書き込み成功は `{"ok":true}` または `{"success":true}` が必要です。取得も送信も、ブラウザから読めるJSON応答である必要があります。GASをWebアプリとして公開し、想定する匿名利用者がアクセスできる設定とクロスオリジンでの動作を確認してください。応答が読めない場合に `no-cors` で成功扱いにはしません。送信結果不明時は二重投稿を避けるため、一覧確認を案内します。
 

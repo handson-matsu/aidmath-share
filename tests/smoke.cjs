@@ -45,8 +45,9 @@ const assert = require('node:assert/strict');
       const data = Object.fromEntries(new URLSearchParams(request.postData())); writes.push(data);
       if(action === 'createComment') comments.push({...data,commentId:'c'+(comments.length+1),createdAt:'2026-09-29T01:00:00Z'});
       if(action === 'createPost') posts.push({...data,postId:'p2',createdAt:'2026-09-29T01:00:00Z'});
-      result=action === 'createPost' ? {ok:true,protocol:'post-request-v1',state:'saved',requestId:data.requestId,postId:'p2'} : {ok:true};
+      result=action === 'requestDeleteV2' ? {ok:true,protocol:'delete-request-v1',state:'saved',requestId:data.requestId} : action === 'createPost' ? {ok:true,protocol:'post-request-v1',state:'saved',requestId:data.requestId,postId:'p2'} : {ok:true};
     } else if(action === 'postStatus') { const requestId=new URL(request.url()).searchParams.get('requestId'); const saved=posts.find(p=>p.requestId===requestId); result={ok:true,protocol:'post-request-v1',requestId,state:saved?'saved':'not_found',...(saved?{postId:saved.postId}:{})}; }
+    else if(action === 'deleteRequestStatus') result={ok:true,protocol:'delete-request-v1',state:'not_found',requestId:new URL(request.url()).searchParams.get('requestId')};
     else if(action === 'topics') result={ok:true,topics:[{topicId:'t1',name:'敷き詰めパターン',description:'かたちのつながりを見つけよう'}]};
     else if(action === 'posts') result={ok:true,posts};
     else if(action === 'comments') result={ok:true,comments};

@@ -50,7 +50,7 @@ try { anonymousId(); } catch { /* Browsing remains available when storage is dis
 
 // GAS reads POST fields from e.parameter. URLSearchParams uses a CORS-safelisted form encoding.
 async function api(action, params = {}, signal) {
-  const write = ['createPost', 'createComment', 'requestDelete'].includes(action);
+  const write = ['createPost', 'createComment', 'requestDelete', 'requestDeleteV2'].includes(action);
   const url = new URL(API_URL);
   url.searchParams.set('action', action);
   if (!write) Object.entries(params).forEach(([key, value]) => url.searchParams.set(key, value));
@@ -58,24 +58,32 @@ async function api(action, params = {}, signal) {
   const abort = () => controller.abort();
   if (signal?.aborted) abort();
   signal?.addEventListener('abort', abort, { once: true });
-  const timer = setTimeout(abort, write ? 90000 : 30000);
+  let failureKind = 'network';
+  let timedOut = false;
+  const timer = setTimeout(() => { timedOut = true; abort(); }, write ? 90000 : 30000);
   try {
     const response = await fetch(url, {
       method: write ? 'POST' : 'GET',
       ...(write ? { body: new URLSearchParams({ action, ...params }) } : {}),
       signal: controller.signal, credentials: 'omit', redirect: 'follow'
     });
+    failureKind = 'http';
     if (!response.ok) throw new Error('http');
+    failureKind = 'json';
     const result = await response.json();
+    failureKind = 'api';
     if (!result || result.ok === false || result.success === false || result.error) throw new Error('api');
+    failureKind = 'unconfirmed';
     if (write && result.ok !== true && result.success !== true) throw new Error('unconfirmed');
     // Image responses use data for base64, not for a response envelope.
     return action === 'image' ? result : (result.data ?? result);
   } catch {
     // Never display server diagnostics: these can contain spreadsheet or Drive identifiers.
-    throw new Error(write
+    const error = new Error(write
       ? '送信結果を確認できませんでした。送信済みの可能性があるため、一覧を確認してから再操作してください。'
       : 'データを読み込めませんでした。通信環境を確認し、時間をおいて再読み込みしてください。解決しない場合は管理者にお知らせください。');
+    error.kind = timedOut ? 'timeout' : controller.signal.aborted ? 'aborted' : failureKind;
+    throw error;
   } finally {
     clearTimeout(timer);
     signal?.removeEventListener('abort', abort);
@@ -367,12 +375,7 @@ async function createPostView(topic, token) {
   if (pending) run(false);
 
 }
-function deleteButton(targetType, targetId) { return button('削除を申請', () => {
-  deleteTarget = { targetType, targetId };
-  document.querySelector('#delete-form').reset();
-  document.querySelector('#delete-form .form-error').textContent = '';
-  document.querySelector('#delete-dialog').showModal();
-}, 'text-button danger'); }
+function deleteButton(targetType, targetId) { return button('削除を申請', () => openDeleteRequest({ targetType, targetId }), 'text-button danger'); }
 async function detail(topic, postId, signal, token) {
   const posts = collection(await api('posts', { topicId: topic.id }, signal), 'posts').map(postRecord);
   if (token !== generation) return;
@@ -436,21 +439,141 @@ async function detail(topic, postId, signal, token) {
 }
 const deleteDialog = document.querySelector('#delete-dialog');
 const deleteForm = document.querySelector('#delete-form');
+const deleteCheck = document.querySelector('#delete-check');
+const deleteSubmit = deleteForm.querySelector('[type="submit"]');
+const deleteMessage = document.querySelector('#delete-result');
+const deleteStoragePrefix = 'aidmath-share-delete-request-';
 let deleting = false;
-document.querySelector('#delete-cancel').addEventListener('click', () => deleteDialog.close());
-deleteDialog.addEventListener('cancel', event => { if (deleting) event.preventDefault(); });
-deleteForm.addEventListener('submit', async event => {
-  event.preventDefault();
-  const error = deleteForm.querySelector('.form-error'); error.textContent = '';
-  const reason = deleteForm.elements.reason.value.trim();
-  if (!reason) { error.textContent = '申請理由を入力してください。'; return; }
-  deleting = true; busy(deleteForm, true);
+let pendingDelete = null;
+let deleteStorageError = false;
+const deleteKey = target => deleteStoragePrefix + target.targetType + '-' + encodeURIComponent(target.targetId);
+function readDeleteRequest(target) {
+  const raw = localStorage.getItem(deleteKey(target));
+  if (!raw) return null;
+  const p = JSON.parse(raw);
+  if (!['post', 'comment'].includes(p.targetType) || typeof p.targetId !== 'string' || !p.targetId || !/^delete_[a-f0-9]{64}$/.test(p.requestId) || !/^[a-zA-Z0-9-]{20,80}$/.test(p.requesterId) ||
+      p.targetType !== target.targetType || p.targetId !== target.targetId || typeof p.reason !== 'string' || !p.reason.trim() ||
+      p.reason.length > 2000 || typeof p.saved !== 'boolean') throw new Error('storage');
+  return p;
+}
+function deleteControls() {
+  busy(deleteForm, deleting);
+  deleteForm.elements.reason.disabled = deleting || Boolean(pendingDelete) || deleteStorageError;
+  deleteSubmit.disabled = deleting || deleteStorageError || Boolean(pendingDelete?.saved);
+  deleteSubmit.textContent = deleting ? '申請結果を確認中…' : pendingDelete ? '同じ申請を再確認・再送する' : '申請する';
+  deleteCheck.hidden = !pendingDelete || pendingDelete.saved;
+  deleteCheck.disabled = deleting || deleteStorageError;
+}
+function renderPendingDeletes() {
+  const list = document.querySelector('#pending-deletes');
+  list.replaceChildren();
   try {
-    await api('requestDelete', { ...deleteTarget, reason, requesterId: anonymousId() });
-    deleteDialog.close(); notify('削除申請を受け付けました。管理者が確認します。');
-  } catch (err) { error.textContent = err.message; }
-  finally { deleting = false; busy(deleteForm, false); }
-});
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (!key?.startsWith(deleteStoragePrefix)) continue;
+      const raw = JSON.parse(localStorage.getItem(key));
+      const p = readDeleteRequest(raw);
+      if (p && !p.saved) list.append(button((p.targetType === 'post' ? '作品' : 'コメント') + 'の未確認の削除申請を確認する', () => openDeleteRequest(p), 'secondary'));
+    }
+  } catch { list.append(el('p', '', '削除申請の確認情報を読み込めません。保存データを消さず管理者にご相談ください。')); }
+}
+function openDeleteRequest(target) {
+  if (deleting || deleteDialog.open) return;
+  deleteTarget = { targetType: target.targetType, targetId: target.targetId };
+  pendingDelete = null; deleteStorageError = false;
+  deleteForm.reset(); deleteForm.querySelector('.form-error').textContent = ''; deleteMessage.textContent = '';
+  try {
+    pendingDelete = readDeleteRequest(deleteTarget);
+    if (pendingDelete) deleteForm.elements.reason.value = pendingDelete.reason;
+  } catch {
+    deleteStorageError = true;
+    deleteForm.querySelector('.form-error').textContent = '削除申請の確認情報を読み込めません。保存データを消さず管理者にご相談ください。';
+  }
+  deleteControls(); deleteDialog.showModal();
+  if (pendingDelete?.saved) deleteMessage.textContent = 'この対象の削除申請は送信済みです。管理者が確認します。';
+  else if (pendingDelete) runDeleteRequest(false);
+}
+async function deleteRequestStatus(pending) {
+  const result = await api('deleteRequestStatus', { requestId: pending.requestId, requesterId: pending.requesterId });
+  if (result.protocol !== 'delete-request-v1' || result.requestId !== pending.requestId || !['saved', 'processing', 'not_found'].includes(result.state)) {
+    const error = new Error('削除申請の確認機能がまだ利用できません。管理者にお知らせください。');
+    error.kind = 'protocol'; throw error;
+  }
+  return result;
+}
+function completeDeleteRequest() {
+  pendingDelete.saved = true;
+  // Keep a receipt so reopening the dialog does not start another request.
+  try { localStorage.setItem(deleteKey(pendingDelete), JSON.stringify(pendingDelete)); } catch { /* The same ID remains safe to query/retry. */ }
+  renderPendingDeletes(); deleteDialog.close(); notify('削除申請を送信しました。管理者が確認します。');
+}
+async function runDeleteRequest(allowSend) {
+  if (deleting || deleteStorageError || pendingDelete?.saved) return;
+  deleting = true; deleteControls();
+  const errorBox = deleteForm.querySelector('.form-error'); errorBox.textContent = '';
+  deleteMessage.textContent = '削除申請の保存結果を確認中…';
+  let lastState = '', failureKind = '';
+  try {
+    if (!pendingDelete) {
+      pendingDelete = readDeleteRequest(deleteTarget);
+      if (!pendingDelete) {
+        const reason = deleteForm.elements.reason.value.trim();
+        if (!reason || reason.length > 2000 || reason.startsWith('=')) {
+          deleteMessage.textContent = ''; errorBox.textContent = '申請理由を2000文字以内で入力してください。先頭に「=」は使用できません。'; return;
+        }
+        const requesterId = anonymousId();
+        // Identical submissions from two tabs also get the same ID. This is not authentication.
+        const bytes = new TextEncoder().encode(JSON.stringify([requesterId, deleteTarget.targetType, deleteTarget.targetId, reason]));
+        const digest = await crypto.subtle.digest('SHA-256', bytes);
+        const requestId = 'delete_' + Array.from(new Uint8Array(digest), n => n.toString(16).padStart(2, '0')).join('');
+        pendingDelete = readDeleteRequest(deleteTarget) || { ...deleteTarget, requesterId, requestId, reason, saved: false };
+        localStorage.setItem(deleteKey(pendingDelete), JSON.stringify(pendingDelete));
+      }
+      deleteForm.elements.reason.value = pendingDelete.reason;
+    }
+    // Persist before ANY send, including retries; inability to retain the ID must block POST.
+    localStorage.setItem(deleteKey(pendingDelete), JSON.stringify(pendingDelete));
+    deleteControls(); renderPendingDeletes();
+    if (pendingDelete.saved) { completeDeleteRequest(); return; }
+    const before = await deleteRequestStatus(pendingDelete);
+    lastState = before.state;
+    if (lastState === 'saved') { completeDeleteRequest(); return; }
+    if (allowSend && lastState === 'not_found') {
+      try {
+        const { saved, ...payload } = pendingDelete;
+        const result = await api('requestDeleteV2', payload);
+        if (result.protocol === 'delete-request-v1' && result.requestId === pendingDelete.requestId && result.state === 'saved') {
+          completeDeleteRequest(); return;
+        }
+        if (result.protocol === 'delete-request-v1' && result.requestId === pendingDelete.requestId && result.state === 'processing') lastState = 'processing';
+        else failureKind = 'protocol';
+      } catch (err) { failureKind = err.kind || 'unknown'; }
+    }
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const status = await deleteRequestStatus(pendingDelete); lastState = status.state;
+        if (lastState === 'saved') { completeDeleteRequest(); return; }
+      } catch (err) { lastState = ''; failureKind = err.kind || 'unknown'; }
+      if (attempt < 2) await new Promise(resolve => setTimeout(resolve, 1500));
+    }
+    deleteMessage.textContent = lastState === 'processing'
+      ? '申請の保存確認が処理待ちです。「保存結果を確認する」で確認してください。'
+      : lastState === 'not_found'
+        ? '現時点では保存を確認できません。遅れて保存される可能性があります。確認を続けるか、同じ申請のまま再確認・再送できます。'
+        : '削除申請の保存結果が不明です。保存済みの可能性があります。「保存結果を確認する」で確認してください。';
+    if (failureKind) errorBox.textContent = '確認情報：' + failureKind + '。新しい申請は作成せず、同じ申請情報を保持しています。';
+  } catch (err) {
+    deleteMessage.textContent = '申請情報を保持したまま確認を中断しました。新しい申請として送り直さず、この画面から保存結果を確認してください。';
+    errorBox.textContent = err.kind === 'protocol' ? err.message : err.kind
+      ? '保存結果を確認できませんでした（確認情報：' + err.kind + '）。'
+      : '申請の確認情報を保存・読み込みできません。ブラウザの保存設定を確認し、管理者にご相談ください。';
+  } finally { deleting = false; deleteControls(); renderPendingDeletes(); }
+}
+document.querySelector('#delete-cancel').addEventListener('click', () => { if (!deleting) deleteDialog.close(); });
+deleteDialog.addEventListener('cancel', event => { if (deleting) event.preventDefault(); });
+deleteCheck.addEventListener('click', () => runDeleteRequest(false));
+deleteForm.addEventListener('submit', event => { event.preventDefault(); runDeleteRequest(true); });
+renderPendingDeletes();
 async function route() {
   const token = ++generation;
   readController?.abort(); readController = new AbortController();
