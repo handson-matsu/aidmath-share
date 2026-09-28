@@ -45,8 +45,9 @@ const assert = require('node:assert/strict');
       const data = Object.fromEntries(new URLSearchParams(request.postData())); writes.push(data);
       if(action === 'createComment') comments.push({...data,commentId:'c'+(comments.length+1),createdAt:'2026-09-29T01:00:00Z'});
       if(action === 'createPost') posts.push({...data,postId:'p2',createdAt:'2026-09-29T01:00:00Z'});
-      result={ok:true};
-    } else if(action === 'topics') result={ok:true,topics:[{topicId:'t1',name:'敷き詰めパターン',description:'かたちのつながりを見つけよう'}]};
+      result=action === 'createPost' ? {ok:true,protocol:'post-request-v1',state:'saved',requestId:data.requestId,postId:'p2'} : {ok:true};
+    } else if(action === 'postStatus') { const requestId=new URL(request.url()).searchParams.get('requestId'); const saved=posts.find(p=>p.requestId===requestId); result={ok:true,protocol:'post-request-v1',requestId,state:saved?'saved':'not_found',...(saved?{postId:saved.postId}:{})}; }
+    else if(action === 'topics') result={ok:true,topics:[{topicId:'t1',name:'敷き詰めパターン',description:'かたちのつながりを見つけよう'}]};
     else if(action === 'posts') result={ok:true,posts};
     else if(action === 'comments') result={ok:true,comments};
     else if(action === 'image') result={ok:true,hasImage:true,mimeType:'image/png',data:image};
@@ -84,6 +85,31 @@ const assert = require('node:assert/strict');
   assert.equal(writes[2].imageData,image);
   assert.equal(writes[2].imageType,'image/png');
   await page.waitForFunction(() => [...document.querySelectorAll('.art-frame img')].length === 2 && [...document.querySelectorAll('.art-frame img')].every(img => img.naturalWidth > 0));
+  // Deliberately interleaved roots, replies, and a reply to a reply.
+  comments.splice(0, comments.length, ...[
+    ['a', '', 'コメントA'], ['a1', 'a', 'Aへの返信1'],
+    ['b', '', 'コメントB'], ['b1', 'b', 'Bへの返信'],
+    ['a2', 'a', 'Aへの返信2'], ['a3', 'a1', '返信への返信'],
+    ['orphan', 'missing', '非公開の親への返信'],
+    ['cycle1', 'cycle2', '循環1'], ['cycle2', 'cycle1', '循環2']
+  ].map(([commentId,replyTo,body], i) => ({commentId,replyTo,body,createdAt:`2026-09-28T01:00:0${i}Z`})));
+  await page.getByRole('link',{name:/三角形の敷き詰め/}).click();
+  await page.getByText('返信への返信',{exact:true}).waitFor();
+  assert.deepEqual(await page.locator('.comment-number').allTextContents(), ['#1','#2','#5','#6','#3','#4','#7','#8','#9']);
+  assert.equal(await page.locator('#comment-6 .reply-reference').textContent(),'↳ #2 への返信');
+  assert.equal(await page.locator('#comment-4 .reply-reference').textContent(),'↳ #3 への返信');
+  const indents = await page.locator('.comment.reply').evaluateAll(nodes => nodes.map(node => getComputedStyle(node).marginLeft));
+  assert.equal(new Set(indents).size,1);
+  await page.locator('#comment-6 .reply-reference').click();
+  assert.equal(await page.evaluate(()=>document.activeElement.id),'comment-2');
+  await page.locator('#comment-5').getByRole('button',{name:'返信',exact:true}).click();
+  assert.match(await page.locator('.reply-banner').textContent(),/^#5 /);
+  await page.getByLabel('コメント本文').fill('さらに返信');
+  await page.getByRole('button',{name:'コメントを投稿',exact:true}).click();
+  await page.getByText('さらに返信',{exact:true}).waitFor();
+  assert.equal(writes.at(-1).replyTo,'a2');
+  assert.deepEqual(await page.locator('.comment-number').allTextContents(), ['#1','#2','#5','#6','#10','#3','#4','#7','#8','#9']);
+  assert.equal(await page.locator('#comment-10 .reply-reference').textContent(),'↳ #5 への返信');
   assert.equal(accessRequests,1, 'hash navigation and posting must not record extra visits');
   assert.deepEqual(await page.evaluate(()=>window.accessCalls),[{method:'GET',keepalive:true,mode:'no-cors',cache:'no-store'}]);
   await page.setViewportSize({width:390,height:844});

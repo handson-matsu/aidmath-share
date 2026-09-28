@@ -90,6 +90,25 @@ const text = value => typeof value === 'string' || typeof value === 'number' ? S
 function topicRecord(raw) { return { id: text(raw.topicId ?? raw.id), name: text(raw.name ?? raw.title ?? raw.topicName), description: text(raw.description) }; }
 function postRecord(raw) { return { id: text(raw.postId ?? raw.id), name: text(raw.displayName ?? raw.authorName), title: text(raw.title), body: text(raw.body ?? raw.description ?? raw.content), createdAt: text(raw.createdAt ?? raw.timestamp) }; }
 function commentRecord(raw) { return { id: text(raw.commentId ?? raw.id), parentId: text(raw.replyTo ?? raw.parentCommentId ?? raw.parentId), name: text(raw.displayName ?? raw.authorName), body: text(raw.body ?? raw.content ?? raw.comment), createdAt: text(raw.createdAt ?? raw.timestamp) }; }
+// Input remains chronological so numbering and order within each group stay stable.
+function groupComments(comments) {
+  const byId = new Map(comments.map(comment => [comment.id, comment]));
+  const groups = new Map();
+  const ungrouped = [];
+  comments.filter(comment => !comment.parentId).forEach(comment => groups.set(comment.id, [comment]));
+  for (const comment of comments) {
+    if (!comment.parentId) continue;
+    let ancestor = comment;
+    const visited = new Set();
+    while (ancestor?.parentId && !visited.has(ancestor.id)) {
+      visited.add(ancestor.id);
+      ancestor = byId.get(ancestor.parentId);
+    }
+    if (ancestor && !ancestor.parentId) groups.get(ancestor.id).push(comment);
+    else ungrouped.push(comment); // Keep missing-parent and cyclic records visible.
+  }
+  return [...groups.values()].flat().concat(ungrouped);
+}
 function dateNumber(value) { const n = Date.parse(value); return Number.isFinite(n) ? n : 0; }
 function dateLabel(value) { return dateNumber(value) ? new Intl.DateTimeFormat('ja-JP', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value)) : '日時不明'; }
 function metadata(record) {
@@ -227,6 +246,24 @@ function field(form, labelText, name, { multiline = false, required = false, max
   return input;
 }
 function busy(form, value) { form.querySelectorAll('button,input,textarea').forEach(n => { n.disabled = value; }); }
+// Pending metadata survives reloads; image data stays only in this tab's memory.
+const pendingPostBodies = new Map();
+const pendingPostKey = topicId => 'aidmath-share-pending-post-' + encodeURIComponent(topicId);
+function readPendingPost(topicId) {
+  const raw = localStorage.getItem(pendingPostKey(topicId));
+  if (!raw) return null;
+  const value = JSON.parse(raw);
+  if (!value.requestId || !value.authorId) throw new Error('投稿の確認情報を読み込めません。管理者にご相談ください。');
+  return value;
+}
+async function postStatus(pending) {
+  const result = await api('postStatus', { requestId: pending.requestId, authorId: pending.authorId });
+  if (result.protocol !== 'post-request-v1' || result.requestId !== pending.requestId || !['saved', 'processing', 'not_found'].includes(result.state)) {
+    throw new Error('投稿結果の確認機能がまだ利用できません。管理者にお知らせください。');
+  }
+  if (result.state === 'saved' && !result.postId) throw new Error('投稿結果を確認できません。');
+  return result;
+}
 async function createPostView(topic, token) {
   const wrap = el('div', 'narrow');
   wrap.append(link('← ' + topic.name + 'の作品一覧', topicURL(topic.id), 'back'), el('h1', '', '作品を投稿する'), el('p', 'lead', '見つけた工夫や不思議を、作品と一緒に伝えよう。'));
@@ -259,17 +296,76 @@ async function createPostView(topic, token) {
       preview.src = data; preview.hidden = false;
     } catch (err) { if (version === selection) { error.textContent = err.message || '画像を読み込めませんでした。'; file.value = ''; } }
   });
-  form.addEventListener('submit', async event => {
-    event.preventDefault(); error.textContent = '';
-    if (!title.value.trim()) { error.textContent = 'タイトルを入力してください。'; title.focus(); return; }
-    if (!image) { error.textContent = '画像を選び、プレビューが表示されるまでお待ちください。'; return; }
-    busy(form, true); submit.textContent = '投稿中…';
+  let pending = null;
+  let sending = false;
+  let storageError = false;
+  const check = button('保存結果を確認する', () => run(false), 'secondary');
+  check.hidden = true; actions.prepend(check);
+  try { pending = readPendingPost(topic.id); }
+  catch { storageError = true; error.textContent = '投稿の確認情報を読み込めません。ブラウザの保存設定を確認してください。'; }
+  function setState() {
+    busy(form, sending || Boolean(pending) || storageError);
+    check.hidden = !pending;
+    check.disabled = sending;
+    submit.disabled = sending || storageError || Boolean(pending && !pendingPostBodies.has(pending.requestId));
+    submit.textContent = sending ? '投稿結果を確認中…' : pending ? '同じ投稿を再確認・再送する' : '作品を投稿する';
+  }
+  function complete(result) {
+    if (!result.postId) return false;
+    pendingPostBodies.delete(pending.requestId);
+    // Never erase another tab's newer pending request.
     try {
-      await api('createPost', { topicId: topic.id, authorId: anonymousId(), displayName: name.value.trim(), title: title.value.trim(), body: body.value.trim(), ...image });
-      if (token === generation) { notify('作品を投稿しました。'); location.hash = topicURL(topic.id); }
+      if (readPendingPost(topic.id)?.requestId === pending.requestId) localStorage.removeItem(pendingPostKey(topic.id));
+    } catch { /* A later lookup can still confirm the saved request. */ }
+    pending = null;
+    if (token === generation) { notify('作品を投稿しました。'); location.hash = topicURL(topic.id); }
+    return true;
+  }
+  async function run(allowSend) {
+    if (sending || storageError) return;
+    sending = true; error.textContent = ''; setState();
+    try {
+      if (!pending) {
+        // Reuse another tab's pending ID if one was recorded while this form was open.
+        pending = readPendingPost(topic.id);
+        if (!pending) {
+          if (!title.value.trim() || !image) throw new Error('タイトルと画像プレビューを確認してください。');
+          pending = { requestId: crypto.randomUUID(), authorId: anonymousId() };
+          const payload = { ...pending, topicId: topic.id, displayName: name.value.trim(), title: title.value.trim(), body: body.value.trim(), ...image };
+          try { localStorage.setItem(pendingPostKey(topic.id), JSON.stringify(pending)); }
+          catch { pending = null; throw new Error('投稿の確認情報を保存できません。ブラウザの保存設定を確認してください。'); }
+          pendingPostBodies.set(pending.requestId, payload);
+        }
+      }
+      setState();
+      // Require the new GAS protocol before sending: old GAS silently ignores requestId.
+      const before = await postStatus(pending);
+      if (before.state === 'saved') { complete(before); return; }
+      if (allowSend && before.state === 'not_found' && pendingPostBodies.has(pending.requestId)) {
+        try {
+          const result = await api('createPost', pendingPostBodies.get(pending.requestId));
+          if (result.protocol === 'post-request-v1' && result.requestId === pending.requestId && result.state === 'saved' && result.postId) {
+            complete(result); return;
+          }
+        } catch { /* A lost response is not evidence of a failed save. Query before retrying. */ }
+      }
+      for (let attempt = 0; attempt < 3; attempt++) {
+        if (token !== generation) return;
+        try {
+          const status = await postStatus(pending);
+          if (status.state === 'saved') { complete(status); return; }
+        } catch { /* Keep the pending ID on network errors. */ }
+        if (attempt < 2) await new Promise(resolve => setTimeout(resolve, 1500));
+      }
+      error.textContent = '投稿結果をまだ確認できません。保存済み・処理中の可能性があります。「保存結果を確認する」を押してください。再送時も同じ投稿IDを使用します。';
+      if (!pendingPostBodies.has(pending.requestId)) error.textContent += ' この画面では画像を保持していないため、再送せず結果の確認だけを行います。';
     } catch (err) { error.textContent = err.message; }
-    finally { busy(form, false); submit.textContent = '作品を投稿する'; }
-  });
+    finally { sending = false; setState(); }
+  }
+  form.addEventListener('submit', event => { event.preventDefault(); run(true); });
+  setState();
+  if (pending) run(false);
+
 }
 function deleteButton(targetType, targetId) { return button('削除を申請', () => {
   deleteTarget = { targetType, targetId };
@@ -310,16 +406,17 @@ async function detail(topic, postId, signal, token) {
       list.replaceChildren();
       if (!comments.length) { state(list, 'まだコメントはありません', '最初の気づきを伝えてみませんか。'); return; }
       const numbers = new Map(comments.map((c,i) => [c.id, i + 1]));
-      comments.forEach((comment, i) => {
-        const card = el('article', 'comment' + (comment.parentId ? ' reply' : '')); card.id = 'comment-' + (i + 1);
+      groupComments(comments).forEach(comment => {
+        const number = numbers.get(comment.id);
+        const card = el('article', 'comment' + (comment.parentId ? ' reply' : '')); card.id = 'comment-' + number;
         if (comment.parentId) {
           const parentNumber = numbers.get(comment.parentId);
           if (parentNumber) card.append(button('↳ #' + parentNumber + ' への返信', () => { const parent = document.getElementById('comment-' + parentNumber); parent.tabIndex = -1; parent.focus(); parent.scrollIntoView({ block: 'center', behavior: 'auto' }); }, 'text-button reply-reference'));
           else card.append(el('p', 'reply-reference', '↳ 公開されていないコメントへの返信'));
         }
-        const head = el('div', 'comment-head'); head.append(el('span', 'comment-number', '#' + (i + 1)), metadata(comment));
+        const head = el('div', 'comment-head'); head.append(el('span', 'comment-number', '#' + number), metadata(comment));
         const buttons = el('div', 'comment-actions');
-        buttons.append(button('返信', () => { replyTo = comment.id; replyLabel.textContent = '#' + (i + 1) + ' ' + (comment.name || '匿名さん') + ' への返信'; banner.hidden = false; body.focus(); }), deleteButton('comment', comment.id));
+        buttons.append(button('返信', () => { replyTo = comment.id; replyLabel.textContent = '#' + number + ' ' + (comment.name || '匿名さん') + ' への返信'; banner.hidden = false; body.focus(); }), deleteButton('comment', comment.id));
         card.append(head, el('p', 'body-text', comment.body), buttons); list.append(card);
       });
     } catch (err) { if (token === generation) state(list, 'コメントを取得できません', err.message, refreshComments); }
