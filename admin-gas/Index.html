@@ -11,6 +11,11 @@
 <div class="heading"><div><p class="eyebrow">ADMINISTRATION</p><h1 id="moderation-title"></h1></div><button id="moderation-reload" class="secondary">再読み込み</button></div>
 <p id="moderation-hint" class="hint"></p>
 <label id="request-filter-label" for="request-filter" hidden>申請の表示</label><select id="request-filter" hidden><option value="pending">未処理（pending）</option><option value="all">すべて</option></select>
+<div id="comment-controls" hidden>
+<div class="actions"><label>コメント状態<select id="comment-filter"><option value="all">すべて</option><option value="published">公開</option><option value="hidden">非公開</option><option value="deleted">削除済み</option></select></label>
+<label>親作品状態<select id="comment-post-filter"><option value="all">すべて</option><option value="published">公開中</option><option value="hidden">非公開</option><option value="deleted">削除済み</option><option value="unknown">作品不明</option></select></label></div>
+<div class="actions"><button id="comment-prev" class="secondary">前の50件</button><span id="comment-page" role="status"></span><button id="comment-next" class="secondary">次の50件</button></div>
+</div>
 <p id="moderation-message" role="status" aria-live="polite"></p><section id="moderation-list" aria-label="管理一覧" aria-busy="false"></section>
 </main></div>
 <dialog id="editor" aria-labelledby="editor-title"><form id="topic-form"><h2 id="editor-title">テーマを追加</h2>

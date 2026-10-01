@@ -13,7 +13,7 @@ const Admin = {
       else if (method === 'updateTopic') runner.adminUpdateTopic(payload);
       else if (method === 'listPosts') runner.adminListPosts();
       else if (method === 'setPostStatus') runner.adminSetPostStatus(payload);
-      else if (method === 'listComments') runner.adminListComments();
+      else if (method === 'listComments') runner.adminListComments(payload);
       else if (method === 'setCommentStatus') runner.adminSetCommentStatus(payload);
       else if (method === 'listRequests') runner.adminListDeleteRequests();
       else if (method === 'resolveRequest') runner.adminResolveDeleteRequest(payload);
@@ -80,6 +80,8 @@ const Moderation = (() => {
   const labels = { published: '公開', hidden: '非公開', deleted: '削除済み', pending: '未処理', approved: '承認済み', rejected: '却下済み' };
   const titles = { posts: '作品管理', comments: 'コメント管理', requests: '削除申請管理' };
   let view = 'posts', loading = false, saving = false, records = [];
+  let commentStarts = [undefined], commentPage = 0, commentSnapshot, commentNext = null;
+  function resetComments() { commentStarts = [undefined]; commentPage = 0; commentSnapshot = undefined; commentNext = null; }
   const known = status => ['published', 'hidden', 'deleted'].includes(status);
   const statusText = status => (labels[status] || '不明な状態') + '（' + status + '）';
   function date(value) {
@@ -89,6 +91,9 @@ const Moderation = (() => {
   function controls() {
     $('moderation-reload').disabled = loading || saving;
     $('request-filter').disabled = loading || saving;
+    $('comment-filter').disabled = $('comment-post-filter').disabled = loading || saving;
+    $('comment-prev').disabled = loading || saving || commentPage === 0 || !records.length;
+    $('comment-next').disabled = loading || saving || commentNext === null || !records.length;
     document.querySelectorAll('#moderation-list button').forEach(b => { b.disabled = loading || saving; });
     document.querySelectorAll('[data-view]').forEach(b => { b.disabled = loading || saving; });
   }
@@ -108,7 +113,7 @@ const Moderation = (() => {
       card.append(heading); note(card, 'ID: ' + item.id);
       if (view === 'posts') note(card, 'テーマ：' + item.topicTitle + '（' + item.topicId + '）');
       if (view === 'comments') {
-        note(card, '作品ID: ' + item.postId + ' ／ 作品の状態：' + statusText(item.postStatus));
+        note(card, '作品ID: ' + item.postId + ' ／ 作品の状態：' + (item.postState === 'unknown' ? '作品不明' : statusText(item.postStatus)));
         note(card, item.replyTo ? '返信コメント ／ 返信先ID: ' + item.replyTo : '通常コメント');
       }
       note(card, (view === 'requests' ? '申請日：' : '投稿日：') + date(item.createdAt));
@@ -132,23 +137,50 @@ const Moderation = (() => {
         action(actions, '却下', () => resolve(item, 'rejected'));
       } else if (view !== 'requests') {
         if (item.status === 'published') action(actions, '非公開にする', () => update(item, 'hidden'));
-        if (item.status === 'hidden') action(actions, '公開に戻す', () => update(item, 'published'));
+        if (item.status === 'hidden') {
+          if (view !== 'comments' || item.postState === 'published') action(actions, '公開に戻す', () => update(item, 'published'));
+          else note(card, '親作品が公開中でないため再公開できません。', 'hint');
+        }
         if (['published', 'hidden'].includes(item.status)) action(actions, '削除する', () => update(item, 'deleted'), true);
         else note(card, item.status === 'deleted' ? '削除済みです。この画面から再公開はできません。' : '不明な状態のため変更できません。シートを確認してください。', 'hint');
       }
       card.append(actions); list.append(card);
     }
   }
-  async function load(message = '') {
+  async function loadCommentPage(direction) {
+    let target = direction === 'next' ? commentPage + 1 : direction === 'prev' ? commentPage - 1 : commentPage;
+    const starts = commentStarts.slice();
+    if (direction === 'next') starts[target] = commentNext;
+    let result;
+    do {
+      const payload = {status: $('comment-filter').value, postStatus: $('comment-post-filter').value};
+      if (commentSnapshot !== undefined) payload.snapshotRow = commentSnapshot;
+      if (starts[target] !== undefined) payload.startRow = starts[target];
+      result = await Admin.call('listComments', payload);
+      if (result.items.length || target === 0) break;
+      if (direction === 'next') { commentNext = null; return false; }
+      target--;
+    } while (true);
+    records = result.items; commentSnapshot = result.snapshotRow; commentPage = target;
+    starts[target] = result.startRow; commentStarts = starts.slice(0, target + 1); commentNext = result.nextRow;
+    $('comment-page').textContent = `${commentPage + 1}ページ ／ ${records.length}件`;
+    return true;
+  }
+  async function load(message = '', direction = 'current') {
     if (loading) return;
     loading = true; controls(); $('moderation-list').setAttribute('aria-busy', 'true');
     $('moderation-message').textContent = message ? message + ' 一覧を更新中…' : '読み込み中…';
     try {
-      records = await Admin.call({ posts: 'listPosts', comments: 'listComments', requests: 'listRequests' }[view]);
-      records.sort((a, b) => (Date.parse(b.createdAt) || 0) - (Date.parse(a.createdAt) || 0));
+      if (view === 'comments') {
+        if (!await loadCommentPage(direction)) { $('moderation-message').textContent = 'これ以降に該当コメントはありません。'; return; }
+      } else {
+        records = await Admin.call({ posts: 'listPosts', requests: 'listRequests' }[view]);
+        records.sort((a, b) => (Date.parse(b.createdAt) || 0) - (Date.parse(a.createdAt) || 0));
+      }
       render(); $('moderation-message').textContent = message;
     } catch (e) {
       records = []; $('moderation-list').replaceChildren();
+      if (view === 'comments') $('comment-page').textContent = '';
       $('moderation-message').textContent = (message ? message + ' ' : '') + e.message;
     } finally { loading = false; controls(); $('moderation-list').setAttribute('aria-busy', 'false'); }
   }
@@ -160,6 +192,7 @@ const Moderation = (() => {
     catch (e) {
       // Discard stale actions: a failed response does not prove that the write failed.
       records = []; $('moderation-list').replaceChildren();
+      if (view === 'comments') $('comment-page').textContent = '';
       $('moderation-message').textContent = e.message + ' 保存済みの可能性があります。「再読み込み」で現在の状態を確認してください。';
     } finally { saving = false; controls(); }
   }
@@ -181,9 +214,20 @@ const Moderation = (() => {
       ? '承認は対象を削除済みにし、却下は対象を変更しません。対象が既に削除済みの申請も承認できます。'
       : '全状態のデータを表示します。削除済みのデータは再公開できません。作品や親コメントの状態を変えても、関連コメントの状態は自動変更しません。';
     $('request-filter').hidden = $('request-filter-label').hidden = view !== 'requests';
-    $('request-filter').value = 'pending'; load();
+    $('request-filter').value = 'pending';
+    $('comment-controls').hidden = view !== 'comments';
+    if (view === 'comments') {
+      resetComments(); $('comment-filter').value = $('comment-post-filter').value = 'all'; $('comment-page').textContent = '';
+      $('moderation-hint').textContent = '登録の新しい順に50件ずつ表示します。親作品が公開中でないコメントは再公開できません。関連コメントの状態は自動変更しません。';
+    }
+    load();
   }
-  $('moderation-reload').addEventListener('click', () => load());
+  $('moderation-reload').addEventListener('click', () => { if (view === 'comments') resetComments(); load(); });
+  for (const id of ['comment-filter', 'comment-post-filter']) $(id).addEventListener('change', () => {
+    if (loading || saving) return; resetComments(); records = []; $('moderation-list').replaceChildren(); load();
+  });
+  $('comment-next').addEventListener('click', () => { if (!loading && !saving && commentNext !== null) load('', 'next'); });
+  $('comment-prev').addEventListener('click', () => { if (!loading && !saving && commentPage > 0) load('', 'prev'); });
   $('request-filter').addEventListener('change', () => { if (!loading && !saving) render(); });
   return { open, isBusy: () => loading || saving };
 })();

@@ -1,7 +1,7 @@
 const fs = require('node:fs'), vm = require('node:vm'), path = require('node:path'), crypto = require('node:crypto');
 module.exports = function fixture() {
   const now = new Date('2026-09-28T01:00:00Z');
-  const state = { active: 'owner@example.test', effective: 'owner@example.test', locked: false, writes: [], failWrite: null, failFlush: false };
+  const state = { active: 'owner@example.test', effective: 'owner@example.test', locked: false, writes: [], reads: [], searches: [], failWrite: null, failFlush: false };
   const rows = {
     Topics: [['topicId','title','description','imageEnabled','commentEnabled','isActive'], ['tiling','敷き詰め','説明',true,true,true]],
     Posts: [['postId','topicId','authorId','displayName','title','body','imageFileId','createdAt','status','requestId','extra'],
@@ -21,7 +21,13 @@ module.exports = function fixture() {
   const sheets = Object.fromEntries(Object.keys(rows).map(name => [name, {
     getLastColumn: () => rows[name][0].length, getLastRow: () => rows[name].length,
     getRange: (r,c,h,w) => ({
-      getValues: () => Array.from({length:h},(_,i)=>Array.from({length:w},(_,j)=>rows[name][r-1+i]?.[c-1+j]??'')),
+      getValues: () => { state.reads.push({name,r,c,h,w}); return Array.from({length:h},(_,i)=>Array.from({length:w},(_,j)=>rows[name][r-1+i]?.[c-1+j]??'')); },
+      createTextFinder: text => {
+        state.searches.push({name,r,c,h,w,text});
+        const finder = {matchEntireCell:()=>finder,matchCase:()=>finder,useRegularExpression:()=>finder,
+          findAll:()=>rows[name].slice(r-1,r-1+h).flatMap((row,i)=>row[c-1]===text?[{getRow:()=>r+i}]:[])};
+        return finder;
+      },
       setValues: values => {
         if (state.failWrite === name) throw Error('simulated write failure');
         state.writes.push({name,r,c,h,w});

@@ -1,14 +1,14 @@
 const assert = require('node:assert/strict');
 const fixture = require('./moderation-fixture.cjs');
 const ok = result => { assert.equal(result.ok,true,JSON.stringify(result)); return result.data; };
-function item(f,type,id) { return ok(f.call(type==='post'?'adminListPosts':'adminListComments')).find(r=>r.id===id); }
+function item(f,type,id) { const data=ok(f.call(type==='post'?'adminListPosts':'adminListComments')); return (type==='post'?data:data.items).find(r=>r.id===id); }
 function set(f,type,id,status,revision) { return f.call(type==='post'?'adminSetPostStatus':'adminSetCommentStatus',{id,status,revision:revision??item(f,type,id).revision}); }
 function request(f,id,decision='approved') { const r=ok(f.call('adminListDeleteRequests')).find(r=>r.id===id); return {id,decision,revision:r.revision,...(decision==='approved'?{targetRevision:r.target?.contentRevision,targetStatus:r.target?.status}:{})}; }
 {
  const f=fixture(), before=structuredClone(f.rows);
  const posts=ok(f.call('adminListPosts')); assert.equal(posts.length,3); assert.equal(posts[0].topicTitle,'敷き詰め'); assert.equal(posts[0].createdAt,'2026-09-28T01:00:00.000Z'); assert.ok(!('authorId' in posts[0]));
- assert.equal(ok(f.call('adminListComments')).length,4);
- for(const type of ['post','comment']) {
+ assert.equal(ok(f.call('adminListComments')).items.length,4);
+ for(const type of ['comment','post']) {
   const id=type==='post'?'p1':'c1', stale=item(f,type,id).revision;
   ok(set(f,type,id,'hidden')); assert.equal(set(f,type,id,'published',stale).error.code,'CONFLICT');
   ok(set(f,type,id,'published')); ok(set(f,type,id,'deleted')); assert.equal(set(f,type,id,'published').error.code,'STATUS');
